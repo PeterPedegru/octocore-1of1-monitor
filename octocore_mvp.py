@@ -929,7 +929,7 @@ class TelegramNotifier:
         self.token = token
         self.chat_id = chat_id
 
-    def _call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _call(self, method: str, payload: dict[str, Any], timeout_seconds: int = 20) -> dict[str, Any]:
         request = urllib.request.Request(
             f"https://api.telegram.org/bot{self.token}/{method}",
             data=json.dumps(payload).encode(),
@@ -937,7 +937,7 @@ class TelegramNotifier:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=20, context=trusted_ssl_context()) as response:
+            with urllib.request.urlopen(request, timeout=timeout_seconds, context=trusted_ssl_context()) as response:
                 result = json.loads(response.read())
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
             raise RpcError(f"Telegram {method} failed: {error}") from error
@@ -955,7 +955,9 @@ class TelegramNotifier:
         payload: dict[str, Any] = {"timeout": 25, "allowed_updates": ["message"]}
         if offset is not None:
             payload["offset"] = offset
-        return self._call("getUpdates", payload)["result"]
+        # Telegram long polling deliberately waits for `timeout`; the HTTP timeout
+        # must be longer or an idle bot produces a false error every poll.
+        return self._call("getUpdates", payload, timeout_seconds=35)["result"]
 
 
 def load_dotenv(path: Path = Path(".env")) -> None:
@@ -1014,7 +1016,7 @@ def notify_mints(mints: Iterable[MintEvent], store: Any, notifier: Optional[Tele
             for chat_id in recipients:
                 notifier.send_to(chat_id, format_mint_alert(mint, store))
         elif notifier:
-            logging.info(json.dumps({"event": "mint_alert_suppressed", "token_id": mint.token_id, "reason": "current_window_1of1_already_minted"}))
+            logging.debug(json.dumps({"event": "mint_alert_suppressed", "token_id": mint.token_id, "reason": "current_window_1of1_already_minted"}))
 
 
 def telegram_update_loop(store: Any, notifier: TelegramNotifier) -> None:

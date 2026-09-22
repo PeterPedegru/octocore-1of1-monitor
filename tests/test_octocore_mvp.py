@@ -116,6 +116,14 @@ class StoreTests(unittest.TestCase):
             self.assertIn("Current 1/1: MINTED — Ninja", start)
             self.assertIn("Current chance to mint a 1/1: 0.00%", start)
 
+    def test_start_message_says_alerts_resume_in_next_window_after_unique(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = MonitorStore(Path(directory) / "monitor.sqlite3")
+            store.migrate()
+            store.insert_mint(MintEvent(555, "0x555", 1, "0xblock", 1, "0xminter", 10**16, "0xseed", "0xwork", "0xtarget", "0xnonce", 12))
+
+            self.assertIn("I will notify you when the next window begins", format_start_message(store))
+
 
 if __name__ == "__main__":
     unittest.main()
