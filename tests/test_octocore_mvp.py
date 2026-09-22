@@ -8,7 +8,9 @@ from octocore_mvp import (
     MonitorStore,
     candidate_probability,
     format_mint_alert,
+    format_start_message,
     probability_within,
+    should_send_mint_alert,
     state_for_next_mint,
     window_for_token,
 )
@@ -101,6 +103,18 @@ class StoreTests(unittest.TestCase):
             self.assertIn('href="https://explorer.inkonchain.com/tx/0x600"', alert)
             self.assertIn("Chance that the next valid mint is a 1/1: 0.00%", alert)
             self.assertIn("follow me: https://x.com/IntelPocik", alert)
+
+    def test_alerts_are_suppressed_after_the_window_unique_is_minted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = MonitorStore(Path(directory) / "monitor.sqlite3")
+            store.migrate()
+            special = MintEvent(555, "0x555", 1, "0xblock", 1, "0xminter", 10**16, "0xseed", "0xwork", "0xtarget", "0xnonce", 12)
+            store.insert_mint(special)
+
+            self.assertFalse(should_send_mint_alert(store))
+            start = format_start_message(store)
+            self.assertIn("Current 1/1: MINTED — Ninja", start)
+            self.assertIn("Current chance to mint a 1/1: 0.00%", start)
 
 
 if __name__ == "__main__":

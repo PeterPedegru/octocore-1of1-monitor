@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import threading
 from pathlib import Path
 
 from octocore_mvp import (
@@ -18,6 +19,7 @@ from octocore_mvp import (
     monitor_websocket,
     require_public_ink_rpc,
     require_rpc_from_env,
+    telegram_update_loop,
 )
 
 
@@ -54,6 +56,9 @@ def main() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
     notifier = TelegramNotifier(token, chat_id) if token and chat_id else None
+    if notifier:
+        store.add_subscriber(notifier.chat_id)
+        threading.Thread(target=telegram_update_loop, args=(store, notifier), daemon=True, name="telegram-updates").start()
     monitor_websocket(
         store,
         require_public_ink_rpc(),

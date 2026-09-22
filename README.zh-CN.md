@@ -38,6 +38,10 @@ python3 -u bot.py monitor
 `CLOUDFLARE_D1_DATABASE_ID`。如需 Telegram 通知，还要设置
 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID`。
 
+向 Telegram bot 发送 `/start` 即可订阅 chat。bot 会用英文回复当前 window
+状态。只有当前 window 的 1/1 尚未铸造时才会发送 mint alert；1/1 出现后，
+通知将在下一个 window 恢复。
+
 实时 monitor 使用公共 Ink WebSocket，不会持续消耗 Blockscout credits。
 Blockscout PRO 仅用于历史回填。
 

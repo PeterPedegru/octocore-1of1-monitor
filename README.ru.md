@@ -39,6 +39,11 @@ python3 -u bot.py monitor
 `CLOUDFLARE_D1_DATABASE_ID`. Уведомления отправляются, когда заданы также
 `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_ID`.
 
+Отправьте `/start` Telegram-боту, чтобы подписать chat. Бот ответит на
+английском текущим статусом window. Mint alerts приходят только пока 1/1
+текущего window ещё доступен; после его mint уведомления возобновятся в
+следующем window.
+
 Realtime monitor использует public Ink WebSocket и не тратит Blockscout
 credits. Blockscout PRO используется только для historical backfill.
 

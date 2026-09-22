@@ -12,6 +12,7 @@ import logging
 import os
 import sqlite3
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -259,6 +260,11 @@ class MonitorStore:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS telegram_subscribers (
+                    chat_id TEXT PRIMARY KEY,
+                    username TEXT,
+                    subscribed_at INTEGER NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS idx_mints_block ON mints(block_number, token_id);
                 """
             )
@@ -391,9 +397,26 @@ class MonitorStore:
                 (str(block_number),),
             )
 
+    def get_telegram_update_offset(self) -> Optional[int]:
+        with self._connect() as db:
+            row = db.execute("SELECT value FROM sync_state WHERE key = 'telegram_update_offset'").fetchone()
+        return int(row[0]) if row else None
+
+    def set_telegram_update_offset(self, offset: int) -> None:
+        with self._connect() as db:
+            db.execute("INSERT INTO sync_state(key, value) VALUES ('telegram_update_offset', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (str(offset),))
+
     def unique_rows(self) -> list[sqlite3.Row]:
         with self._connect() as db:
             return db.execute("SELECT * FROM uniques ORDER BY window_id").fetchall()
+
+    def add_subscriber(self, chat_id: str, username: Optional[str] = None) -> None:
+        with self._connect() as db:
+            db.execute("INSERT OR IGNORE INTO telegram_subscribers(chat_id, username, subscribed_at) VALUES (?, ?, ?)", (str(chat_id), username, int(time.time())))
+
+    def subscriber_chat_ids(self) -> list[str]:
+        with self._connect() as db:
+            return [row[0] for row in db.execute("SELECT chat_id FROM telegram_subscribers ORDER BY subscribed_at")]
 
 
 class D1Store:
@@ -459,6 +482,7 @@ class D1Store:
             CREATE TABLE IF NOT EXISTS mints (token_id INTEGER PRIMARY KEY, tx_hash TEXT NOT NULL UNIQUE, block_number INTEGER NOT NULL, block_hash TEXT NOT NULL, timestamp INTEGER NOT NULL, minter TEXT NOT NULL, price_wei TEXT NOT NULL, seed TEXT NOT NULL, work TEXT NOT NULL, target TEXT NOT NULL, nonce TEXT NOT NULL, window_id INTEGER NOT NULL, position INTEGER NOT NULL, is_1of1 INTEGER NOT NULL, rarity_type TEXT, unique_index INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS uniques (token_id INTEGER PRIMARY KEY, window_id INTEGER NOT NULL UNIQUE, type TEXT NOT NULL, unique_index INTEGER NOT NULL, block_number INTEGER NOT NULL, timestamp INTEGER NOT NULL, tx_hash TEXT NOT NULL UNIQUE, minter TEXT NOT NULL, position INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS telegram_subscribers (chat_id TEXT PRIMARY KEY, username TEXT, subscribed_at INTEGER NOT NULL);
             CREATE INDEX IF NOT EXISTS idx_mints_block ON mints(block_number, token_id);
             """
         )
@@ -534,8 +558,21 @@ class D1Store:
     def set_sync_block(self, block_number: int) -> None:
         self.query("INSERT INTO sync_state(key, value) VALUES ('last_scanned_block', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (block_number,))
 
+    def get_telegram_update_offset(self) -> Optional[int]:
+        rows = self.query("SELECT value FROM sync_state WHERE key = 'telegram_update_offset'")
+        return int(rows[0]["value"]) if rows else None
+
+    def set_telegram_update_offset(self, offset: int) -> None:
+        self.query("INSERT INTO sync_state(key, value) VALUES ('telegram_update_offset', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (offset,))
+
     def unique_rows(self) -> list[dict[str, Any]]:
         return self.query("SELECT * FROM uniques ORDER BY window_id")
+
+    def add_subscriber(self, chat_id: str, username: Optional[str] = None) -> None:
+        self.query("INSERT OR IGNORE INTO telegram_subscribers(chat_id, username, subscribed_at) VALUES (?, ?, ?)", (str(chat_id), username, int(time.time())))
+
+    def subscriber_chat_ids(self) -> list[str]:
+        return [row["chat_id"] for row in self.query("SELECT chat_id FROM telegram_subscribers ORDER BY subscribed_at")]
 
 
 class RpcError(RuntimeError):
@@ -852,16 +889,50 @@ def format_mint_alert(mint: MintEvent, store: Any) -> str:
     return "\n".join(lines)
 
 
+def should_send_mint_alert(store: Any) -> bool:
+    return store.next_state().probability_next > 0
+
+
+def format_start_message(store: Any) -> str:
+    state = store.next_state()
+    current_unique = store.unique_for_window(state.window.id)
+    lines = [
+        "🐙 <b>OCTOCORE 1/1 MONITOR</b>",
+        "",
+        f"Current window: #{state.window.id} ({state.window.start}–{state.window.end})",
+        f"Next mint: #{state.next_token_id}",
+        f"Remaining NFTs: {state.remaining}",
+        "",
+    ]
+    if current_unique:
+        chance_at_win = candidate_probability(state.window.end - current_unique.token_id + 1)
+        lines.extend([
+            f"Current 1/1: MINTED — {unique_type(current_unique.unique_index)}",
+            f"Winning mint: #{current_unique.token_id} ({current_unique.position}/{state.window.size})",
+            f"Chance at the winning mint: {float(chance_at_win * 100):.2f}%",
+            "Current chance to mint a 1/1: 0.00%",
+            "",
+            "The 1/1 for this window has already been claimed. I will notify you when the next window begins and the chance is above 0%. Stay tuned.",
+        ])
+    else:
+        lines.extend([
+            "Current 1/1: NOT MINTED",
+            f"Current chance to mint a 1/1: {float(state.probability_next * 100):.2f}%",
+            "",
+            "The 1/1 is still available in this window. You will receive alerts while the chance remains above 0%.",
+        ])
+    return "\n".join(lines)
+
+
 class TelegramNotifier:
     def __init__(self, token: str, chat_id: str) -> None:
         self.token = token
         self.chat_id = chat_id
 
-    def send(self, text: str) -> None:
-        payload = json.dumps({"chat_id": self.chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}).encode()
+    def _call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
         request = urllib.request.Request(
-            f"https://api.telegram.org/bot{self.token}/sendMessage",
-            data=payload,
+            f"https://api.telegram.org/bot{self.token}/{method}",
+            data=json.dumps(payload).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
@@ -869,9 +940,22 @@ class TelegramNotifier:
             with urllib.request.urlopen(request, timeout=20, context=trusted_ssl_context()) as response:
                 result = json.loads(response.read())
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
-            raise RpcError(f"Telegram delivery failed: {error}") from error
+            raise RpcError(f"Telegram {method} failed: {error}") from error
         if not result.get("ok"):
-            raise RpcError(f"Telegram delivery failed: {result}")
+            raise RpcError(f"Telegram {method} failed: {result}")
+        return result
+
+    def send_to(self, chat_id: str, text: str) -> None:
+        self._call("sendMessage", {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True})
+
+    def send(self, text: str) -> None:
+        self.send_to(self.chat_id, text)
+
+    def get_updates(self, offset: Optional[int]) -> list[dict[str, Any]]:
+        payload: dict[str, Any] = {"timeout": 25, "allowed_updates": ["message"]}
+        if offset is not None:
+            payload["offset"] = offset
+        return self._call("getUpdates", payload)["result"]
 
 
 def load_dotenv(path: Path = Path(".env")) -> None:
@@ -925,8 +1009,33 @@ def ingest_logs(store: Any, rpc: Any, logs: Iterable[dict[str, Any]]) -> list[Mi
 def notify_mints(mints: Iterable[MintEvent], store: Any, notifier: Optional[TelegramNotifier]) -> None:
     for mint in mints:
         logging.info(json.dumps({"event": "mint", "token_id": mint.token_id, "unique": mint.is_unique, "tx": mint.tx_hash}))
-        if notifier:
-            notifier.send(format_mint_alert(mint, store))
+        if notifier and should_send_mint_alert(store):
+            recipients = store.subscriber_chat_ids() or [notifier.chat_id]
+            for chat_id in recipients:
+                notifier.send_to(chat_id, format_mint_alert(mint, store))
+        elif notifier:
+            logging.info(json.dumps({"event": "mint_alert_suppressed", "token_id": mint.token_id, "reason": "current_window_1of1_already_minted"}))
+
+
+def telegram_update_loop(store: Any, notifier: TelegramNotifier) -> None:
+    offset = store.get_telegram_update_offset()
+    while True:
+        try:
+            for update in notifier.get_updates(offset):
+                offset = int(update["update_id"]) + 1
+                store.set_telegram_update_offset(offset)
+                message = update.get("message")
+                if not message or message.get("text", "").split()[0:1] != ["/start"]:
+                    continue
+                chat = message["chat"]
+                username = message.get("from", {}).get("username")
+                chat_id = str(chat["id"])
+                store.add_subscriber(chat_id, username)
+                notifier.send_to(chat_id, format_start_message(store))
+                logging.info(json.dumps({"event": "telegram_subscriber_started", "chat_id": chat_id, "username": username}))
+        except (RpcError, urllib.error.URLError) as error:
+            logging.error(json.dumps({"event": "telegram_update_error", "error": str(error)}))
+            time.sleep(5)
 
 
 def backfill(store: Any, rpc: BlockscoutRpc, start_block: int, chunk_size: int = 2_000) -> int:

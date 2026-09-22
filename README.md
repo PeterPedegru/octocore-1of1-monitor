@@ -39,6 +39,11 @@ Set `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, and
 `TELEGRAM_CHAT_ID` are configured. Without them it still logs newly indexed
 mints as JSON lines.
 
+Send `/start` to the Telegram bot to subscribe a chat. The bot replies in
+English with the current window status. Mint alerts are sent only while the
+current window's 1/1 is still available; after it is minted, alerts resume at
+the next window.
+
 ## Deliberately deferred from MVP
 
 - full reorg rollback;
