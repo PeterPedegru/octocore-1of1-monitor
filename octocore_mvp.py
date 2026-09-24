@@ -579,14 +579,18 @@ class RpcError(RuntimeError):
     pass
 
 
-def trusted_ssl_context() -> ssl.SSLContext:
-    """Use a verified system CA bundle when Python's framework bundle is absent."""
+def trusted_ca_bundle() -> Optional[str]:
     configured = os.environ.get("SSL_CERT_FILE")
     candidates = [configured] if configured else []
     candidates.extend(("/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt"))
-    for candidate in candidates:
-        if candidate and Path(candidate).is_file():
-            return ssl.create_default_context(cafile=candidate)
+    return next((candidate for candidate in candidates if candidate and Path(candidate).is_file()), None)
+
+
+def trusted_ssl_context() -> ssl.SSLContext:
+    """Use a verified system CA bundle when Python's framework bundle is absent."""
+    bundle = trusted_ca_bundle()
+    if bundle:
+        return ssl.create_default_context(cafile=bundle)
     return ssl.create_default_context()
 
 
@@ -820,8 +824,9 @@ class InkWebSocket:
             ws = None
             try:
                 ssl_options = {"cert_reqs": ssl.CERT_REQUIRED}
-                if self._ssl_context.get_ca_certs():
-                    ssl_options["ca_certs"] = os.environ.get("SSL_CERT_FILE", "/etc/ssl/cert.pem")
+                bundle = trusted_ca_bundle()
+                if bundle:
+                    ssl_options["ca_certs"] = bundle
                 ws = websocket.create_connection(endpoint, timeout=self.timeout_seconds, sslopt=ssl_options)
                 ws.send(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_subscribe", "params": ["newHeads"]}))
                 ws.send(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "eth_subscribe", "params": ["logs", {"address": COLLECTION_ADDRESS, "topics": [MINED_TOPIC]}]}))
@@ -939,7 +944,7 @@ class TelegramNotifier:
         try:
             with urllib.request.urlopen(request, timeout=timeout_seconds, context=trusted_ssl_context()) as response:
                 result = json.loads(response.read())
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ssl.SSLError, OSError) as error:
             raise RpcError(f"Telegram {method} failed: {error}") from error
         if not result.get("ok"):
             raise RpcError(f"Telegram {method} failed: {result}")
@@ -1035,7 +1040,7 @@ def telegram_update_loop(store: Any, notifier: TelegramNotifier) -> None:
                 store.add_subscriber(chat_id, username)
                 notifier.send_to(chat_id, format_start_message(store))
                 logging.info(json.dumps({"event": "telegram_subscriber_started", "chat_id": chat_id, "username": username}))
-        except (RpcError, urllib.error.URLError) as error:
+        except (RpcError, urllib.error.URLError, ssl.SSLError, OSError) as error:
             logging.error(json.dumps({"event": "telegram_update_error", "error": str(error)}))
             time.sleep(5)
 
