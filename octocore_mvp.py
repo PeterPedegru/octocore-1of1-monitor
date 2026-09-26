@@ -890,12 +890,21 @@ def format_mint_alert(mint: MintEvent, store: Any) -> str:
     if mint.is_unique:
         lines[0] = "🔥 <b>NEW OCTOCORE 1/1</b>"
         lines.insert(2, f"Type: {rarity}")
+        lines.extend([
+            "",
+            "Current chance to mint a 1/1 in this window: 0.00%",
+            "The 1/1 for this window has now been claimed. I will notify you when the next window begins and the chance is above 0%. Stay tuned.",
+        ])
     lines.extend(["", "follow me: https://x.com/IntelPocik", "and have a good luck mate 🫡"])
     return "\n".join(lines)
 
 
 def should_send_mint_alert(store: Any) -> bool:
     return store.next_state().probability_next > 0
+
+
+def should_notify_mint(mint: MintEvent, store: Any) -> bool:
+    return mint.is_unique or should_send_mint_alert(store)
 
 
 def format_start_message(store: Any) -> str:
@@ -1016,7 +1025,7 @@ def ingest_logs(store: Any, rpc: Any, logs: Iterable[dict[str, Any]]) -> list[Mi
 def notify_mints(mints: Iterable[MintEvent], store: Any, notifier: Optional[TelegramNotifier]) -> None:
     for mint in mints:
         logging.info(json.dumps({"event": "mint", "token_id": mint.token_id, "unique": mint.is_unique, "tx": mint.tx_hash}))
-        if notifier and should_send_mint_alert(store):
+        if notifier and should_notify_mint(mint, store):
             recipients = store.subscriber_chat_ids() or [notifier.chat_id]
             for chat_id in recipients:
                 notifier.send_to(chat_id, format_mint_alert(mint, store))

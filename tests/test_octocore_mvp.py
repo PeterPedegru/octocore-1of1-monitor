@@ -10,6 +10,7 @@ from octocore_mvp import (
     format_mint_alert,
     format_start_message,
     probability_within,
+    should_notify_mint,
     should_send_mint_alert,
     state_for_next_mint,
     window_for_token,
@@ -123,6 +124,16 @@ class StoreTests(unittest.TestCase):
             store.insert_mint(MintEvent(555, "0x555", 1, "0xblock", 1, "0xminter", 10**16, "0xseed", "0xwork", "0xtarget", "0xnonce", 12))
 
             self.assertIn("I will notify you when the next window begins", format_start_message(store))
+
+    def test_new_unique_alert_is_sent_even_when_the_following_chance_is_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = MonitorStore(Path(directory) / "monitor.sqlite3")
+            store.migrate()
+            special = MintEvent(4167, "0x4167", 1, "0xblock", 1, "0xminter", 4 * 10**16, "0xseed", "0xwork", "0xtarget", "0xnonce", 8)
+            store.insert_mint(special)
+
+            self.assertTrue(should_notify_mint(special, store))
+            self.assertIn("Current chance to mint a 1/1 in this window: 0.00%", format_mint_alert(special, store))
 
 
 if __name__ == "__main__":
